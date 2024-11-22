@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Tic Tac Toe</title>
+<script type="text/javascript" src="paho-mqtt.js"></script>
+</head>
+<body>
+<canvas id="main" width="600" height="600" style="border:1px solid #000000;"></canvas>
+<br><button id="btn_restart" type="button">Restart</button>
+<script>
+
+// mqtt state machine
+const STATE_NULL = 0;
+const STATE_BROADCAST_WAIT = 1;
+const STATE_WAIT_FOR_MODE = 2;
+const STATE_MY_TURN = 3;
+const STATE_YOUR_TURN = 4;
+const STATE_GAME_OVER = 5;
+
+var clientid = Math.floor(Math.random() * 1000000);
+var state = STATE_NULL;
+var game_id;
+var mark;
+
+function broadcast_and_wait() {
+	var message = new Paho.Message(clientid.toString());
+	message.qos = 2;
+	message.destinationName = "tictactoe/broadcast";
+	mosq.send(message);
+
+	mosq.subscribe("tictactoe/broadcast");
+	mosq.subscribe("tictactoe/" + clientid);
+	state = STATE_BROADCAST_WAIT;
+	b.textContent = "Waiting for new players...";
+}
+
+function join_game(gid) {
+	// join an existing game
+	var message = new Paho.Message(clientid.toString());
+	message.qos = 2;
+	message.destinationName = "tictactoe/" + gid;
+	mosq.send(message);
+	state = STATE_WAIT_FOR_MODE;
+	game_id = gid;
+	b.textContent = "Joining...";
+}
+
+function reset_game() {
+	// reset the board
+	for (let i = 0; i < 9; i++) {
+		board[i] = undefined;
+	}
+}
+
+function draw_shape(s, bx, by) {
+	x = 115 + bx * 185;
+	y = 115 + by * 185;
+	if (s == 0) {
+		ctx.beginPath();
+		ctx.arc(x, y, 50, 0, 2 * Math.PI);
+		ctx.stroke();
+	}
+	else {
+		len = 40;
+		ctx.beginPath();
+		ctx.moveTo(x - len, y - len);
+		ctx.lineTo(x + len, y + len);
+		ctx.stroke();
+		ctx.moveTo(x - len, y + len);
+		ctx.lineTo(x + len, y - len);
+		ctx.stroke();
+	}
+};
+
+function mark_shape(s, bx, by) {
+	draw_shape(s, bx, by);
+	board[by * 3 + bx] = s;
+}
+
+function check_and_switch(defstate) {
+	var which = undefined;
+	for (let y = 0; y < 3; y++) {
+		if (which == undefined && board[y*3] == board[y*3 + 1] && board[y*3] == board[y*3 + 2]) {
+			which = board[y*3];
+		}
+	}
+	for (let x = 0; x < 3; x++) {
+		if (which == undefined && board[x] == board[x + 3] && board[x] == board[x + 6]) {
+			which = board[x];
+		}
+	}
+	if (which == undefined && board[0] == board[4] && board[0] == board[8]) {
+		which = board[0];
+	}
+	if (which == undefined && board[2] == board[4] && board[2] == board[6]) {
+		which = board[2];
+	}
+
+	let count = 0;
+	for (let i = 0; i < 9; i++) {
+		if (board[i] != undefined) {
+			count++;
+		}
+	}
+	if (which == undefined && count == 9) {
+		// draw
+		which = -1;
+	}
+
+	if (which == mark) {
+		state = STATE_GAME_OVER;
+		b.textContent = "You won!";
+	}
+	else if (which == (1-mark)) {
+		state = STATE_GAME_OVER;
+		b.textContent = "You lost...";
+	}
+	else if (which == -1) {
+		state = STATE_GAME_OVER;
+		b.textContent = "Draw.";
+	}
+	else {
+		state = defstate;
+		if (state == STATE_MY_TURN) {
+			b.textContent = "My turn";
+		}
+		else {
+			b.textContent = "Enemy turn";
+		}
+	}
+}
+
+function draw_lines() {
+	ctx.beginPath();
+	ctx.moveTo(200, 50);
+	ctx.lineTo(200, 550);
+	ctx.stroke();
+	ctx.moveTo(400, 50);
+	ctx.lineTo(400, 550);
+	ctx.stroke();
+	ctx.moveTo(50, 200);
+	ctx.lineTo(550, 200);
+	ctx.stroke();
+	ctx.moveTo(50, 400);
+	ctx.lineTo(550, 400);
+	ctx.stroke();
+};
+
+var b = document.getElementById("btn_restart");
+var c = document.getElementById("main");
+var ctx = c.getContext("2d");
+var board = new Array(9);
+
+draw_lines();
+
+c.addEventListener('click', function(event) {
+	if (state == STATE_MY_TURN) {
+		var xPosition = Math.trunc(event.clientX / 200);
+		var yPosition = Math.trunc(event.clientY / 200);
+		if (board[yPosition * 3 + xPosition] == null) {
+			mark_shape(mark, xPosition, yPosition);
+			var message = new Paho.Message(JSON.stringify({
+				x: xPosition,
+				y: yPosition
+			}));
+			message.qos = 2;
+			message.destinationName = "tictactoe/" + game_id;
+			mosq.send(message);
+			check_and_switch(STATE_YOUR_TURN);
+		}
+	}
+});
+
+document.getElementById("btn_restart").addEventListener('click', function(event) {
+	ctx.clearRect(0, 0, 600, 600);
+	draw_lines();
+
+	mosq.unsubscribe("tictactoe/broadcast");
+	mosq.unsubscribe("tictactoe/" + clientid);
+	broadcast_and_wait();
+});
+
+mosq = new Paho.Client("test.mosquitto.org", 8081, "ttt" + clientid);
+
+function onConnect() {
+	broadcast_and_wait();
+};
+
+function onMessageArrived(message) {
+	if (state == STATE_BROADCAST_WAIT) {
+		if (message.topic == "tictactoe/broadcast" && message.payloadString != clientid.toString()) {
+			// join the newly arrived player
+			join_game(message.payloadString);
+		}
+		else if (message.topic == "tictactoe/" + clientid)
+		{
+			// other player tries to join
+			if (!isNaN(message.payloadString)) {
+				game_id = message.payloadString;
+				var message = new Paho.Message("mine");
+				message.qos = 2;
+				message.destinationName = "tictactoe/" + game_id;
+				mosq.send(message);
+				state = STATE_MY_TURN;
+				b.textContent = "My turn";
+				mark = 0;
+				reset_game();
+			}
+		}
+	}
+	else if (state == STATE_WAIT_FOR_MODE) {
+		if (message.topic == "tictactoe/" + clientid) {
+			if (message.payloadString == "mine") {
+				state = STATE_YOUR_TURN;
+				b.textContent = "Enemy turn";
+				mark = 1;
+				reset_game()
+			}
+			else if (message.payloadString == "yours") {
+				state = STATE_MY_TURN;
+				b.textContent = "My turn";
+				mark = 0;
+				reset_game();
+			}
+		}
+	}
+	else if (state == STATE_YOUR_TURN) {
+		if (message.topic == "tictactoe/" + clientid) {
+			pos = JSON.parse(message.payloadString);
+			mark_shape(1-mark, pos.x, pos.y);
+			check_and_switch(STATE_MY_TURN);
+		}
+	}
+};
+
+function onConnectionLost(responseObject) {
+  if (responseObject.errorCode !== 0)
+	mosq.connect({onSuccess:onConnect});
+};
+
+mosq.onConnectionLost = onConnectionLost;
+mosq.onMessageArrived = onMessageArrived;
+mosq.connect({onSuccess:onConnect});
+</script>
+</body>
+</html>
